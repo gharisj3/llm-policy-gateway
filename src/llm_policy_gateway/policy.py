@@ -22,6 +22,8 @@ class PolicySettings(StrictModel):
     rpm: int = Field(gt=0)
     tpm: int = Field(gt=0)
     injection_mode: Literal["off", "flag", "block"]
+    reidentify_response: bool = False
+    redaction_allow_terms: list[str] = Field(default_factory=list)
 
 
 class PolicyOverride(StrictModel):
@@ -32,6 +34,8 @@ class PolicyOverride(StrictModel):
     rpm: int | None = Field(default=None, gt=0)
     tpm: int | None = Field(default=None, gt=0)
     injection_mode: Literal["off", "flag", "block"] | None = None
+    reidentify_response: bool | None = None
+    redaction_allow_terms: list[str] | None = None
 
 
 class PolicyDenied(Exception):

@@ -6,6 +6,8 @@ defaults:
   rpm: 60
   tpm: 30000
   injection_mode: flag
+  reidentify_response: false
+  redaction_allow_terms: []
 tenants:
   clinical-team:
     allowed_models: [clinical-local]

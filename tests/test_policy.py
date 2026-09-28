@@ -19,6 +19,8 @@ def test_policy_inherits_defaults_and_preserves_decimal(tmp_path) -> None:
         "  rpm: 10\n"
         "  tpm: 1000\n"
         "  injection_mode: flag\n"
+        "  reidentify_response: true\n"
+        "  redaction_allow_terms: [Example Clinic]\n"
         "tenants:\n"
         "  alpha:\n"
         "    max_tokens: 50\n",
@@ -29,6 +31,8 @@ def test_policy_inherits_defaults_and_preserves_decimal(tmp_path) -> None:
     assert policy.max_tokens == 50
     assert policy.rpm == 10
     assert policy.budget_usd_per_day == Decimal("1.25")
+    assert policy.reidentify_response is True
+    assert policy.redaction_allow_terms == ["Example Clinic"]
 
 
 def test_policy_denies_tenant_without_entry() -> None:
