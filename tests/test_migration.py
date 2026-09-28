@@ -17,7 +17,7 @@ def test_initial_migration_creates_tenants_and_keys(tmp_path, monkeypatch) -> No
     command.upgrade(config, "head")
 
     inspector = inspect(make_engine(database_url))
-    assert {"tenants", "api_keys", "alembic_version"} <= set(
+    assert {"tenants", "api_keys", "usage_ledger", "alembic_version"} <= set(
         inspector.get_table_names()
     )
     assert {"id", "name", "created_at", "disabled_at"} == {
@@ -33,6 +33,19 @@ def test_initial_migration_creates_tenants_and_keys(tmp_path, monkeypatch) -> No
         "last_used_at",
         "revoked_at",
     } == {column["name"] for column in inspector.get_columns("api_keys")}
+    assert {
+        "id",
+        "tenant_id",
+        "request_id",
+        "day",
+        "model",
+        "prompt_tokens",
+        "completion_tokens",
+        "cost_usd",
+        "status",
+        "created_at",
+        "settled_at",
+    } == {column["name"] for column in inspector.get_columns("usage_ledger")}
 
 
 def test_postgres_urls_use_the_pinned_driver() -> None:

@@ -1,0 +1,10 @@
+models:
+  approved-local:
+    input_per_1k_tokens: "0"
+    output_per_1k_tokens: "0"
+  clinical-local:
+    input_per_1k_tokens: "0.02"
+    output_per_1k_tokens: "0.04"
+  billing-local:
+    input_per_1k_tokens: "0.01"
+    output_per_1k_tokens: "0.02"

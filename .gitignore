@@ -13,3 +13,4 @@ htmlcov/
 *.db
 policy.yaml
 models.yaml
+pricing.yaml
