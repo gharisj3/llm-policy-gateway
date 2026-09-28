@@ -63,7 +63,7 @@ def require_admin(request: Request) -> None:
     header = request.headers.get("authorization", "")
     scheme, _, value = header.partition(" ")
     if scheme.lower() != "bearer" or not hmac.compare_digest(
-        value, request.app.state.admin_token
+        value.encode("utf-8"), request.app.state.admin_token.encode("utf-8")
     ):
         raise AdminUnauthorized
 

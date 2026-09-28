@@ -28,8 +28,13 @@ def test_admin_auth_and_one_time_key_response(database_url) -> None:
             json={"name": "clinical-team"},
             headers={"Authorization": "Bearer wrong"},
         )
-        assert missing.status_code == wrong.status_code == 401
-        assert missing.json() == wrong.json()
+        non_ascii = client.post(
+            "/admin/tenants",
+            json={"name": "clinical-team"},
+            headers=[(b"authorization", "Bearer é".encode())],
+        )
+        assert missing.status_code == wrong.status_code == non_ascii.status_code == 401
+        assert missing.json() == wrong.json() == non_ascii.json()
 
         tenant = client.post(
             "/admin/tenants", json={"name": "clinical-team"}, headers=auth
