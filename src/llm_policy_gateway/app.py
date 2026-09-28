@@ -10,7 +10,11 @@ from llm_policy_gateway.auth import (
     invalid_key_handler,
     policy_denied_handler,
 )
-from llm_policy_gateway.db import make_engine, make_session_factory
+from llm_policy_gateway.db import (
+    make_engine,
+    make_session_factory,
+    require_current_schema,
+)
 from llm_policy_gateway.keys import InvalidKey, require_key_pepper
 from llm_policy_gateway.policy import PolicyDenied, load_policy
 
@@ -25,8 +29,9 @@ def create_app(
         application.state.policy = load_policy(path)
         url = database_url or os.getenv("DATABASE_URL", "sqlite:///./gateway.db")
         engine = make_engine(url)
-        application.state.session_factory = make_session_factory(engine)
         try:
+            require_current_schema(engine)
+            application.state.session_factory = make_session_factory(engine)
             yield
         finally:
             engine.dispose()

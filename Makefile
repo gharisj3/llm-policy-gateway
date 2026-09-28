@@ -1,4 +1,4 @@
-.PHONY: test lint format
+.PHONY: test lint format migrate serve
 
 test:
 	python -m pytest
@@ -10,3 +10,9 @@ lint:
 format:
 	python -m ruff format .
 	python -m ruff check --fix .
+
+migrate:
+	python -m alembic upgrade head
+
+serve:
+	lpg serve

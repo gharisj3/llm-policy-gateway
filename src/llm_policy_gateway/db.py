@@ -1,8 +1,12 @@
 """Persistent tenant and key records."""
 
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import DateTime, ForeignKey, String, create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import (
@@ -75,3 +79,12 @@ def normalize_database_url(database_url: str) -> str:
 
 def make_session_factory(engine: Engine) -> sessionmaker:
     return sessionmaker(engine, expire_on_commit=False)
+
+
+def require_current_schema(engine: Engine) -> None:
+    config_path = Path(__file__).resolve().parents[2] / "alembic.ini"
+    head = ScriptDirectory.from_config(Config(str(config_path))).get_current_head()
+    with engine.connect() as connection:
+        current = MigrationContext.configure(connection).get_current_revision()
+    if current != head:
+        raise RuntimeError("database not migrated — run make migrate")
