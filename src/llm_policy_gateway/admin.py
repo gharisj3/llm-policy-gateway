@@ -5,7 +5,7 @@ import ipaddress
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -15,8 +15,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from llm_policy_gateway.auth import error_response
+from llm_policy_gateway.budget import BudgetManager, usage_as_json
 from llm_policy_gateway.db import (
     ApiKey,
+    Tenant,
     make_engine,
     make_session_factory,
     require_current_schema,
@@ -28,6 +30,8 @@ from llm_policy_gateway.keys import (
     require_key_pepper,
     revoke_key,
 )
+from llm_policy_gateway.policy import PolicyDenied, load_policy
+from llm_policy_gateway.pricing import PricingDocument
 
 PLACEHOLDER_TOKEN = "replace-with-a-long-random-secret"
 LOGGER = logging.getLogger(__name__)
@@ -125,6 +129,14 @@ def create_admin_app(
             require_current_schema(engine)
             application.state.session_factory = make_session_factory(engine)
             application.state.admin_token = token
+            application.state.policy = load_policy(
+                os.getenv("DEFAULT_POLICY_PATH", "policy.yaml")
+            )
+            application.state.budget = BudgetManager(
+                application.state.session_factory,
+                PricingDocument(models={}),
+                sqlite=engine.dialect.name == "sqlite",
+            )
             yield
         finally:
             engine.dispose()
@@ -184,6 +196,22 @@ def create_admin_app(
             return [_key_output(row) for row in list_keys(session, tenant_id)]
         except ValueError:
             return error_response(404, "Tenant not found.", "tenant_not_found")
+
+    @router.get("/tenants/{tenant_id}/usage", response_model=None)
+    def usage(
+        tenant_id: str,
+        request: Request,
+        session: Annotated[Session, Depends(get_session)],
+        day: date | None = None,
+    ) -> dict | JSONResponse:
+        tenant = session.get(Tenant, tenant_id)
+        if tenant is None:
+            return error_response(404, "Tenant not found.", "tenant_not_found")
+        try:
+            limit = request.app.state.policy.for_tenant(tenant.name).budget_usd_per_day
+        except PolicyDenied:
+            return error_response(404, "Tenant policy not found.", "policy_not_found")
+        return usage_as_json(request.app.state.budget.usage(tenant_id, day, limit))
 
     application.include_router(router)
     return application

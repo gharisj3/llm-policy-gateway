@@ -5,12 +5,14 @@ import asyncio
 import json
 import os
 import sys
+from datetime import date
 
 import uvicorn
 
 from llm_policy_gateway.admin import create_admin_app, parse_bind
 from llm_policy_gateway.app import create_app
-from llm_policy_gateway.db import make_engine, make_session_factory
+from llm_policy_gateway.budget import BudgetManager, usage_as_json
+from llm_policy_gateway.db import Tenant, make_engine, make_session_factory
 from llm_policy_gateway.keys import (
     create_tenant,
     disable_tenant,
@@ -19,6 +21,8 @@ from llm_policy_gateway.keys import (
     list_tenants,
     revoke_key,
 )
+from llm_policy_gateway.policy import load_policy
+from llm_policy_gateway.pricing import PricingDocument
 
 
 async def _serve() -> None:
@@ -37,6 +41,9 @@ def main(argv: list[str] | None = None, database_url: str | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lpg")
     root = parser.add_subparsers(dest="group", required=True)
     root.add_parser("serve")
+    usage_parser = root.add_parser("usage")
+    usage_parser.add_argument("tenant_id")
+    usage_parser.add_argument("--day")
     tenant_parser = root.add_parser("tenant")
     tenant_actions = tenant_parser.add_subparsers(dest="action", required=True)
     tenant_create = tenant_actions.add_parser("create")
@@ -65,7 +72,25 @@ def main(argv: list[str] | None = None, database_url: str | None = None) -> int:
         factory = make_session_factory(engine)
         try:
             with factory() as session:
-                if args.group == "tenant" and args.action == "create":
+                if args.group == "usage":
+                    tenant = session.get(Tenant, args.tenant_id)
+                    if tenant is None:
+                        raise ValueError("Tenant does not exist")
+                    day = date.fromisoformat(args.day) if args.day else None
+                    limit = (
+                        load_policy(os.getenv("DEFAULT_POLICY_PATH", "policy.yaml"))
+                        .for_tenant(tenant.name)
+                        .budget_usd_per_day
+                    )
+                    manager = BudgetManager(
+                        factory,
+                        PricingDocument(models={}),
+                        sqlite=engine.dialect.name == "sqlite",
+                    )
+                    print(
+                        json.dumps(usage_as_json(manager.usage(tenant.id, day, limit)))
+                    )
+                elif args.group == "tenant" and args.action == "create":
                     row = create_tenant(session, args.name)
                     print(json.dumps({"id": row.id, "name": row.name}))
                 elif args.group == "tenant" and args.action == "disable":

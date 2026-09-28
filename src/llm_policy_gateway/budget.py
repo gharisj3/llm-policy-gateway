@@ -182,3 +182,19 @@ class BudgetManager:
             "request_count": sum(item["requests"] for item in by_model.values()),
             "per_model": by_model,
         }
+
+
+def usage_as_json(report: dict) -> dict:
+    return {
+        "day": report["day"].isoformat(),
+        "settled": str(report["settled"]),
+        "reserved": str(report["reserved"]),
+        "remaining": str(report["remaining"])
+        if report["remaining"] is not None
+        else None,
+        "request_count": report["request_count"],
+        "per_model": {
+            name: {**figures, "cost_usd": str(figures["cost_usd"])}
+            for name, figures in report["per_model"].items()
+        },
+    }

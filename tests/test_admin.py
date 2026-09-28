@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 
 import pytest
 from alembic import command
@@ -113,3 +114,42 @@ def test_admin_bind_requires_explicit_remote_opt_in(
     monkeypatch.setenv("ADMIN_ALLOW_REMOTE", "true")
     create_admin_app(database_url=database_url, admin_token="valid-admin-token")
     assert "Remote admin bind enabled" in caplog.text
+
+
+def test_admin_and_cli_usage_report_settled_cost(database_url, capsys) -> None:
+    auth = {"Authorization": "Bearer secret-admin-token"}
+    with TestClient(create_admin_app(database_url, "secret-admin-token")) as admin:
+        tenant = admin.post(
+            "/admin/tenants", json={"name": "clinical-team"}, headers=auth
+        ).json()
+        key = admin.post(
+            f"/admin/tenants/{tenant['id']}/keys",
+            json={"label": "usage"},
+            headers=auth,
+        ).json()["key"]
+        with TestClient(create_app(database_url=database_url)) as public:
+            response = public.post(
+                "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model": "clinical-local",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+            assert response.status_code == 200
+        day = datetime.now(UTC).date().isoformat()
+        missing = admin.get(f"/admin/tenants/{tenant['id']}/usage")
+        assert missing.status_code == 401
+        usage = admin.get(
+            f"/admin/tenants/{tenant['id']}/usage?day={day}", headers=auth
+        )
+        assert usage.status_code == 200
+        data = usage.json()
+        assert data["day"] == day
+        assert data["settled"] == "0.000100"
+        assert data["reserved"] == "0"
+        assert data["remaining"] == "4.999900"
+        assert data["request_count"] == 1
+        assert data["per_model"]["clinical-local"]["requests"] == 1
+        assert main(["usage", tenant["id"], "--day", day], database_url) == 0
+        assert json.loads(capsys.readouterr().out) == data
