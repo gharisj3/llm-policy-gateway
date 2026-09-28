@@ -1,19 +1,34 @@
 """Tenant management and one-time API key issuance."""
 
+import hashlib
+import hmac
+import os
 import re
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
 
-from argon2 import PasswordHasher, Type
-from argon2.exceptions import VerificationError, VerifyMismatchError
 from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from llm_policy_gateway.db import ApiKey, Tenant, utc_now
 
 KEY_PATTERN = re.compile(r"^lpg_([0-9a-f]{8})_([A-Za-z0-9_-]{32,})$")
-HASHER = PasswordHasher(type=Type.ID)
+PEPPER_PLACEHOLDER = "replace-with-at-least-32-random-bytes"
+
+
+def require_key_pepper() -> bytes:
+    value = os.getenv("KEY_PEPPER", "")
+    encoded = value.encode("utf-8")
+    if value == PEPPER_PLACEHOLDER or len(encoded) < 32:
+        raise ValueError(
+            "KEY_PEPPER must be a non-placeholder secret of at least 32 bytes"
+        )
+    return encoded
+
+
+def _digest_key(full_key: str, pepper: bytes) -> str:
+    return hmac.new(pepper, full_key.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 class InvalidKey(Exception):
@@ -53,7 +68,7 @@ def issue_key(session: Session, tenant_id: str, label: str) -> IssuedKey:
     row = ApiKey(
         tenant_id=tenant_id,
         prefix=prefix,
-        key_hash=HASHER.hash(full_key),
+        key_hash=_digest_key(full_key, require_key_pepper()),
         label=label,
     )
     session.add(row)
@@ -90,13 +105,10 @@ def verify_key(session: Session, presented: str) -> VerifiedKey:
     if match is None:
         raise InvalidKey
     row = session.scalar(select(ApiKey).where(ApiKey.prefix == match.group(1)))
-    if row is None:
-        raise InvalidKey
-    try:
-        valid = HASHER.verify(row.key_hash, presented)
-    except (VerificationError, VerifyMismatchError) as error:
-        raise InvalidKey from error
-    if not valid or row.revoked_at is not None:
+    candidate = _digest_key(presented, require_key_pepper())
+    expected = row.key_hash if row is not None else "0" * 64
+    valid = hmac.compare_digest(candidate, expected)
+    if not valid or row is None or row.revoked_at is not None:
         raise InvalidKey
     tenant = session.get(Tenant, row.tenant_id)
     if tenant is None or tenant.disabled_at is not None:

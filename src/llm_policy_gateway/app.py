@@ -11,7 +11,7 @@ from llm_policy_gateway.auth import (
     policy_denied_handler,
 )
 from llm_policy_gateway.db import make_engine, make_session_factory
-from llm_policy_gateway.keys import InvalidKey
+from llm_policy_gateway.keys import InvalidKey, require_key_pepper
 from llm_policy_gateway.policy import PolicyDenied, load_policy
 
 
@@ -20,6 +20,7 @@ def create_app(
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        require_key_pepper()
         path = policy_path or os.getenv("DEFAULT_POLICY_PATH", "policy.example.yaml")
         application.state.policy = load_policy(path)
         url = database_url or os.getenv("DATABASE_URL", "sqlite:///./gateway.db")

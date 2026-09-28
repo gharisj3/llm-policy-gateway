@@ -14,7 +14,13 @@ from sqlalchemy.orm import Session
 
 from llm_policy_gateway.auth import error_response
 from llm_policy_gateway.db import ApiKey, make_engine, make_session_factory
-from llm_policy_gateway.keys import create_tenant, issue_key, list_keys, revoke_key
+from llm_policy_gateway.keys import (
+    create_tenant,
+    issue_key,
+    list_keys,
+    require_key_pepper,
+    revoke_key,
+)
 
 PLACEHOLDER_TOKEN = "replace-with-a-long-random-secret"
 
@@ -76,6 +82,7 @@ def create_admin_app(
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        require_key_pepper()
         url = database_url or os.getenv("DATABASE_URL", "sqlite:///./gateway.db")
         engine = make_engine(url)
         application.state.session_factory = make_session_factory(engine)
