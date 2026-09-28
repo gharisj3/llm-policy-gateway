@@ -57,12 +57,20 @@ class ApiKey(Base):
 
 
 def make_engine(database_url: str) -> Engine:
+    database_url = normalize_database_url(database_url)
     options = (
         {"connect_args": {"check_same_thread": False}}
         if database_url.startswith("sqlite:")
         else {}
     )
     return create_engine(database_url, **options)
+
+
+def normalize_database_url(database_url: str) -> str:
+    for scheme in ("postgresql://", "postgres://"):
+        if database_url.startswith(scheme):
+            return "postgresql+psycopg://" + database_url[len(scheme) :]
+    return database_url
 
 
 def make_session_factory(engine: Engine) -> sessionmaker:
