@@ -21,7 +21,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         require_key_pepper()
-        path = policy_path or os.getenv("DEFAULT_POLICY_PATH", "policy.example.yaml")
+        path = policy_path or os.getenv("DEFAULT_POLICY_PATH", "policy.yaml")
         application.state.policy = load_policy(path)
         url = database_url or os.getenv("DATABASE_URL", "sqlite:///./gateway.db")
         engine = make_engine(url)

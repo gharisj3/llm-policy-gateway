@@ -11,3 +11,4 @@ htmlcov/
 !.env.example
 *.sqlite3
 *.db
+policy.yaml

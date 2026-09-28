@@ -69,3 +69,11 @@ def test_null_override_stops_startup(tmp_path) -> None:
     with pytest.raises(ValueError, match=r"line \d+: tenant 'clinical-team'"):
         with TestClient(create_app(path)):
             pass
+
+
+def test_missing_default_policy_stops_startup(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DEFAULT_POLICY_PATH")
+    with pytest.raises(ValueError, match=r"Cannot read policy policy.yaml"):
+        with TestClient(create_app()):
+            pass
