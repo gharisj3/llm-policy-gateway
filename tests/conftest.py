@@ -15,3 +15,7 @@ def key_pepper(monkeypatch) -> None:
         str(Path(__file__).resolve().parents[1] / "models.example.yaml"),
     )
     monkeypatch.setenv("PRESIDIO_NLP_MODEL", "en_core_web_sm")
+    monkeypatch.setenv(
+        "PRICING_PATH",
+        str(Path(__file__).resolve().parents[1] / "pricing.example.yaml"),
+    )

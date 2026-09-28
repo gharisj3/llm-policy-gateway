@@ -1,18 +1,21 @@
+import asyncio
 import json
 import logging
 import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from openai import OpenAI
 
 from llm_policy_gateway.app import create_app
-from llm_policy_gateway.db import make_engine, make_session_factory
+from llm_policy_gateway.db import UsageLedger, make_engine, make_session_factory
 from llm_policy_gateway.keys import create_tenant, issue_key
 from llm_policy_gateway.providers import MockProvider
 
@@ -410,3 +413,125 @@ def test_slow_analysis_does_not_block_healthz(gateway, monkeypatch) -> None:
         assert health.status_code == 200
         assert elapsed < 0.1
         assert future.result().status_code == 200
+
+
+def test_budget_rejection_and_actual_settlement(gateway) -> None:
+    client, key, provider = gateway
+    policy = client.app.state.policy.tenants["clinical-team"]
+    policy.budget_usd_per_day = Decimal("0.01")
+    body = {"model": "clinical-local", "messages": [{"role": "user", "content": "hi"}]}
+    auth = {"Authorization": f"Bearer {key}"}
+    denied = client.post("/v1/chat/completions", headers=auth, json=body)
+    assert denied.status_code == 429
+    assert denied.json()["error"]["code"] == "budget_exceeded"
+    assert provider.received == []
+    policy.budget_usd_per_day = Decimal("5")
+    accepted = client.post("/v1/chat/completions", headers=auth, json=body)
+    assert accepted.status_code == 200
+    assert accepted.headers["x-gateway-budget-remaining-usd"] == "5.00"
+    assert accepted.headers["x-ratelimit-remaining-requests"].isdigit()
+    assert accepted.headers["x-ratelimit-remaining-tokens"].isdigit()
+    with client.app.state.session_factory() as session:
+        row = session.query(UsageLedger).one()
+        assert row.status == "settled"
+        assert row.cost_usd == Decimal("0.000100")
+        assert row.prompt_tokens == accepted.json()["usage"]["prompt_tokens"]
+
+
+def test_upstream_failure_releases_budget(gateway) -> None:
+    client, key, provider = gateway
+    provider.failures = [500, 500, 500]
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "clinical-local",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert response.status_code == 502
+    with client.app.state.session_factory() as session:
+        row = session.query(UsageLedger).one()
+        assert row.status == "released"
+        assert row.cost_usd == Decimal(0)
+
+
+def test_rate_limit_request_and_token_rejections(gateway) -> None:
+    client, key, provider = gateway
+    policy = client.app.state.policy.tenants["clinical-team"]
+    policy.rpm = 1
+    auth = {"Authorization": f"Bearer {key}"}
+    body = {"model": "clinical-local", "messages": [{"role": "user", "content": "hi"}]}
+    assert (
+        client.post("/v1/chat/completions", headers=auth, json=body).status_code == 200
+    )
+    denied = client.post("/v1/chat/completions", headers=auth, json=body)
+    assert denied.status_code == 429
+    assert denied.json()["error"]["code"] == "rate_limited"
+    assert int(denied.headers["Retry-After"]) > 0
+    assert len(provider.received) == 1
+    client.app.state.rate_limiter.buckets.clear()
+    policy.rpm = 30
+    policy.tpm = 1
+    denied = client.post(
+        "/v1/chat/completions",
+        headers=auth,
+        json={**body, "messages": [{"role": "user", "content": "long input value"}]},
+    )
+    assert denied.status_code == 429
+    assert denied.json()["error"]["code"] == "rate_limited"
+    assert int(denied.headers["Retry-After"]) > 0
+    assert len(provider.received) == 1
+
+
+def test_missing_pricing_stops_startup(gateway, tmp_path, monkeypatch) -> None:
+    client, _key, _provider = gateway
+    path = tmp_path / "pricing.yaml"
+    path.write_text(
+        'models:\n  clinical-local:\n    input_per_1k_tokens: "0"\n'
+        '    output_per_1k_tokens: "0"\n'
+    )
+    monkeypatch.setenv("PRICING_PATH", str(path))
+    with pytest.raises(ValueError, match="Missing pricing"):
+        with TestClient(
+            create_app(
+                database_url=str(client.app.state.session_factory.kw["bind"].url)
+            )
+        ):
+            pass
+
+
+def test_simultaneous_requests_reserve_atomically(gateway) -> None:
+    client, key, provider = gateway
+    client.app.state.policy.tenants["clinical-team"].budget_usd_per_day = Decimal(
+        "0.03"
+    )
+    original = provider.chat
+
+    async def delayed(request):
+        await asyncio.sleep(0.2)
+        return await original(request)
+
+    provider.chat = delayed
+
+    async def run():
+        async with AsyncClient(
+            transport=ASGITransport(app=client.app), base_url="http://testserver"
+        ) as async_client:
+            return await asyncio.gather(
+                *[
+                    async_client.post(
+                        "/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={
+                            "model": "clinical-local",
+                            "messages": [{"role": "user", "content": "hi"}],
+                        },
+                    )
+                    for _ in range(2)
+                ]
+            )
+
+    results = asyncio.run(run())
+    assert sorted(result.status_code for result in results) == [200, 429]
+    assert len(provider.received) == 1

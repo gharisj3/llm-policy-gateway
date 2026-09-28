@@ -9,6 +9,7 @@ import os
 import struct
 import time
 from contextlib import asynccontextmanager
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
@@ -27,6 +28,7 @@ from llm_policy_gateway.auth import (
     policy_denied_handler,
 )
 from llm_policy_gateway.boundary import PublicBoundary
+from llm_policy_gateway.budget import BudgetExceeded, BudgetManager, estimate_tokens
 from llm_policy_gateway.db import (
     make_engine,
     make_session_factory,
@@ -34,7 +36,9 @@ from llm_policy_gateway.db import (
 )
 from llm_policy_gateway.keys import InvalidKey, require_key_pepper
 from llm_policy_gateway.policy import PolicyDenied, load_policy
+from llm_policy_gateway.pricing import load_pricing
 from llm_policy_gateway.providers import MockProvider, Provider
+from llm_policy_gateway.rate_limit import InMemoryRateLimiter, RateLimitExceeded
 from llm_policy_gateway.redaction.redactor import (
     RedactionReport,
     RedactionSession,
@@ -45,6 +49,68 @@ from llm_policy_gateway.routing import Router, UpstreamFailure, load_model_route
 from llm_policy_gateway.schemas import ChatRequest, EmbedRequest
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _payload_texts(body: ChatRequest | EmbedRequest) -> list[str]:
+    if isinstance(body, EmbedRequest):
+        return [body.input] if isinstance(body.input, str) else body.input
+    return [
+        message.content
+        if isinstance(message.content, str)
+        else " ".join(part.text for part in message.content)
+        for message in body.messages
+    ]
+
+
+def _rate_admission(
+    request: Request, context: AuthContext, body: ChatRequest | EmbedRequest
+) -> None:
+    estimate = estimate_tokens(_payload_texts(body))
+    state = request.app.state.rate_limiter.admit(
+        context.tenant_id, context.policy.rpm, context.policy.tpm, estimate
+    )
+    request.state.rate_headers = {
+        "x-ratelimit-remaining-requests": str(state.remaining_requests),
+        "x-ratelimit-remaining-tokens": str(state.remaining_tokens),
+    }
+
+
+async def _reserve_budget(
+    request: Request, context: AuthContext, body: ChatRequest | EmbedRequest
+) -> str:
+    prompt = estimate_tokens(_payload_texts(body))
+    completion = (
+        (body.max_completion_tokens or body.max_tokens or context.policy.max_tokens)
+        if isinstance(body, ChatRequest)
+        else 0
+    )
+    return await run_in_threadpool(
+        request.app.state.budget.reserve,
+        context.tenant_id,
+        body.model,
+        prompt,
+        completion,
+        context.policy.budget_usd_per_day,
+    )
+
+
+async def _complete_budget(
+    request: Request, context: AuthContext, reservation: str, result
+) -> None:
+    remaining = await run_in_threadpool(
+        request.app.state.budget.settle,
+        reservation,
+        result.usage.prompt_tokens,
+        result.usage.completion_tokens,
+        context.policy.budget_usd_per_day,
+    )
+    request.state.budget_header = str(
+        remaining.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    )
+
+
+async def _release_budget(request: Request, reservation: str) -> None:
+    await run_in_threadpool(request.app.state.budget.release, reservation)
 
 
 async def _redact_request(
@@ -130,6 +196,9 @@ def create_app(
             application.state.redactor = None
         route_path = models_path or os.getenv("MODELS_PATH", "models.yaml")
         routes = load_model_routes(route_path, application.state.policy)
+        pricing = load_pricing(
+            os.getenv("PRICING_PATH", "pricing.yaml"), set(routes.models)
+        )
         application.state.router = Router(
             routes,
             providers if providers is not None else {"mock": MockProvider()},
@@ -141,6 +210,12 @@ def create_app(
         try:
             require_current_schema(engine)
             application.state.session_factory = make_session_factory(engine)
+            application.state.budget = BudgetManager(
+                application.state.session_factory,
+                pricing,
+                sqlite=engine.dialect.name == "sqlite",
+            )
+            application.state.rate_limiter = InMemoryRateLimiter()
             yield
         finally:
             engine.dispose()
@@ -154,6 +229,16 @@ def create_app(
     application.add_middleware(PublicBoundary, max_request_bytes=limit)
     application.add_exception_handler(InvalidKey, invalid_key_handler)
     application.add_exception_handler(PolicyDenied, policy_denied_handler)
+
+    @application.exception_handler(RateLimitExceeded)
+    def rate_limited(_request: Request, error: RateLimitExceeded) -> JSONResponse:
+        response = error_response(429, "Rate limit exceeded.", "rate_limited")
+        response.headers["Retry-After"] = str(error.retry_after)
+        return response
+
+    @application.exception_handler(BudgetExceeded)
+    def budget_exceeded(_request: Request, _error: BudgetExceeded) -> JSONResponse:
+        return error_response(429, "Daily budget exceeded.", "budget_exceeded")
 
     @application.exception_handler(UpstreamFailure)
     def upstream_error(request: Request, error: UpstreamFailure) -> JSONResponse:
@@ -222,10 +307,19 @@ def create_app(
             )
         if body.max_tokens is None and body.max_completion_tokens is None:
             body = body.model_copy(update={"max_tokens": context.policy.max_tokens})
+        _rate_admission(request, context, body)
         body, redaction_session, _report = await _redact_request(request, body, context)
         if hasattr(request.state, "redaction_header"):
             response.headers["x-gateway-redactions"] = request.state.redaction_header
-        result = await request.app.state.router.chat(body)
+        reservation = await _reserve_budget(request, context, body)
+        try:
+            result = await request.app.state.router.chat(body)
+        except Exception:
+            await _release_budget(request, reservation)
+            raise
+        await _complete_budget(request, context, reservation, result)
+        response.headers.update(request.state.rate_headers)
+        response.headers["x-gateway-budget-remaining-usd"] = request.state.budget_header
         content = (
             redaction_session.reidentify(result.content)
             if redaction_session is not None and context.policy.reidentify_response
@@ -260,12 +354,21 @@ def create_app(
     ) -> dict | JSONResponse:
         if body.model not in context.policy.allowed_models:
             return error_response(403, "Model is not allowed.", "model_not_allowed")
+        _rate_admission(request, context, body)
         body, _redaction_session, _report = await _redact_request(
             request, body, context
         )
         if hasattr(request.state, "redaction_header"):
             response.headers["x-gateway-redactions"] = request.state.redaction_header
-        result = await request.app.state.router.embed(body)
+        reservation = await _reserve_budget(request, context, body)
+        try:
+            result = await request.app.state.router.embed(body)
+        except Exception:
+            await _release_budget(request, reservation)
+            raise
+        await _complete_budget(request, context, reservation, result)
+        response.headers.update(request.state.rate_headers)
+        response.headers["x-gateway-budget-remaining-usd"] = request.state.budget_header
         data = []
         for index, vector in enumerate(result.embeddings):
             embedding = (
