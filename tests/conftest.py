@@ -10,3 +10,7 @@ def key_pepper(monkeypatch) -> None:
         "DEFAULT_POLICY_PATH",
         str(Path(__file__).resolve().parents[1] / "policy.example.yaml"),
     )
+    monkeypatch.setenv(
+        "MODELS_PATH",
+        str(Path(__file__).resolve().parents[1] / "models.example.yaml"),
+    )

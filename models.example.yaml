@@ -1,0 +1,10 @@
+models:
+  approved-local:
+    provider: mock
+    upstream_model: approved-local-v1
+  clinical-local:
+    provider: mock
+    upstream_model: clinical-local-v1
+  billing-local:
+    provider: mock
+    upstream_model: billing-local-v1
