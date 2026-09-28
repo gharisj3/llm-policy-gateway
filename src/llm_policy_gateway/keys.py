@@ -56,6 +56,21 @@ def create_tenant(session: Session, name: str) -> Tenant:
     return tenant
 
 
+def disable_tenant(session: Session, tenant_id: str) -> Tenant:
+    tenant = session.get(Tenant, tenant_id)
+    if tenant is None:
+        raise ValueError("Tenant does not exist")
+    if tenant.disabled_at is None:
+        tenant.disabled_at = utc_now()
+        session.commit()
+        session.refresh(tenant)
+    return tenant
+
+
+def list_tenants(session: Session) -> list[Tenant]:
+    return list(session.scalars(select(Tenant).order_by(Tenant.name, Tenant.id)))
+
+
 def issue_key(session: Session, tenant_id: str, label: str) -> IssuedKey:
     tenant = session.get(Tenant, tenant_id)
     if tenant is None or tenant.disabled_at is not None:

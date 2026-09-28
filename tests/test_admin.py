@@ -89,6 +89,17 @@ def test_cli_tenant_and_key_commands(database_url, capsys) -> None:
     assert main(["key", "revoke", created["id"]], database_url) == 0
     revoked = json.loads(capsys.readouterr().out)
     assert revoked["revoked_at"] is not None
+    assert main(["tenant", "list"], database_url) == 0
+    listed_tenants = json.loads(capsys.readouterr().out)
+    assert listed_tenants[0]["id"] == tenant["id"]
+    assert listed_tenants[0]["disabled_at"] is None
+    assert main(["tenant", "disable", tenant["id"]], database_url) == 0
+    disabled = json.loads(capsys.readouterr().out)
+    assert disabled["disabled_at"] is not None
+    assert main(["tenant", "disable", "missing"], database_url) == 1
+    error = capsys.readouterr()
+    assert error.out == ""
+    assert error.err == "error: Tenant does not exist\n"
 
 
 def test_admin_bind_requires_explicit_remote_opt_in(
