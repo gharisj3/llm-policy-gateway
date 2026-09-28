@@ -1,18 +1,126 @@
 # LLM Policy Gateway
 
-An HTTP gateway for enforcing tenant policies between applications and language
-model providers. The project is being built in stages; the current scaffold
-provides a health endpoint and offline checks.
+An OpenAI-compatible HTTP gateway that sits between your applications and the
+language models they call, and enforces tenant policy in code the application
+cannot bypass. Applications change one base URL. Everything else stays the same.
 
-## Local setup
+> **Status: under active development.** Authentication, tenant policy, model
+> routing and the OpenAI-compatible endpoints work today. Redaction, budgets,
+> injection screening, audit logging and streaming are next. The roadmap below
+> tracks what is done.
+
+## Why it exists
+
+Teams in healthcare billing, finance and other regulated work tend to stall on
+the same three questions before an LLM feature ships: what data actually
+reached the model, who is allowed to call which model, and what stops a runaway
+loop from spending the month's budget overnight. Most answers are a policy
+document. This project makes the answers mechanical: every request passes
+through the same checks, and a request that fails a check never reaches a
+provider.
+
+## What works today
+
+- **OpenAI-compatible endpoints.** `POST /v1/chat/completions`,
+  `POST /v1/embeddings` and `GET /v1/models`. The official `openai` Python SDK
+  works against the gateway by changing only `base_url` and `api_key`, and the
+  test suite proves it.
+- **Tenant API keys.** Keys are shown once at creation. Only a prefix and a
+  peppered HMAC-SHA256 digest are stored. Unknown, wrong and revoked keys all
+  get the same 401 and take the same code path.
+- **Deny-by-default policy.** Each tenant gets an allowlist of models, a token
+  ceiling and other limits in `policy.yaml`. A tenant missing from the file is
+  refused. The file is validated at startup, and a typo stops the process with
+  the line number instead of being silently ignored.
+- **Checks before the model call.** A disallowed model, an over-limit token
+  request or a bad key gets rejected before any provider is contacted. Tests
+  assert zero upstream calls in each case.
+- **Explicit routing.** `models.yaml` maps public model names to a provider and
+  upstream model. There is no silent fallback to a different model. Transient
+  upstream errors are retried with jittered backoff, then surfaced as a 502.
+- **Whitelisted payloads.** Only known request fields are forwarded upstream.
+  Anything else a client sends is dropped.
+- **Separate admin plane.** Tenant and key management runs on its own port,
+  bound to loopback unless explicitly allowed, behind its own token.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    C[Client app<br/>OpenAI SDK] -->|base_url = gateway| G
+    subgraph G[LLM Policy Gateway]
+        A[Auth<br/>tenant API key] --> P[Policy<br/>models, token ceiling]
+        P --> R[Router<br/>models.yaml, retries]
+    end
+    R --> M[Provider adapter]
+    AD[Admin API<br/>loopback only] -.-> DB[(Tenants & keys)]
+    A -.-> DB
+```
+
+## Running it locally
 
 Requires Python 3.11 or newer.
 
 ```sh
 python -m venv .venv
 python -m pip install -e ".[dev]"
-python -m uvicorn llm_policy_gateway.app:app --host 127.0.0.1 --port 8080
+
+cp policy.example.yaml policy.yaml
+cp models.example.yaml models.yaml
+
+# Required secrets. Generate your own; these are examples only.
+export KEY_PEPPER="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+export ADMIN_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
+make migrate                          # create the database schema
+lpg tenant create clinical-team       # prints the tenant id
+lpg key create <tenant-id> --label dev   # prints the key once
+make serve                            # gateway on :8080, admin on 127.0.0.1:8081
 ```
 
-Run the checks with `make lint` and `make test`. Copy `.env.example` to `.env`
-before configuring services in later stages.
+Then call it like any OpenAI endpoint:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="lpg_...")
+reply = client.chat.completions.create(
+    model="clinical-local",
+    messages=[{"role": "user", "content": "Summarise this claim note."}],
+)
+```
+
+The example configuration routes every model to a built-in mock provider, so
+the whole flow runs without any model server. Every setting is documented in
+`.env.example`.
+
+## Development
+
+```sh
+make test     # full suite, offline, no model or API keys needed
+make lint     # ruff check and format check
+make format
+```
+
+## Roadmap
+
+- [x] Scaffold, CI
+- [x] Tenants, API keys, policy validation, admin API and CLI
+- [x] OpenAI-compatible endpoints, routing, retries, mock provider
+- [ ] PII/PHI redaction before any request leaves the gateway
+- [ ] Per-tenant daily budgets and rate limits
+- [ ] Prompt-injection screening for tool and retrieved content
+- [ ] Append-only audit log (fail-closed) and Prometheus metrics
+- [ ] Streaming responses
+- [ ] Ollama, Azure OpenAI, Amazon Bedrock and OpenAI adapters
+- [ ] Redaction evaluation with published precision and recall
+
+## Limitations
+
+This is a reference implementation, not a certified compliance product. Today
+it routes only to the mock provider, and none of the redaction, budget or audit
+controls listed in the roadmap exist yet. Nothing here has been load-tested.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
