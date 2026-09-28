@@ -1,6 +1,8 @@
 """Administrative API served independently from the public application."""
 
 import hmac
+import ipaddress
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -23,6 +25,7 @@ from llm_policy_gateway.keys import (
 )
 
 PLACEHOLDER_TOKEN = "replace-with-a-long-random-secret"
+LOGGER = logging.getLogger(__name__)
 
 
 class AdminUnauthorized(Exception):
@@ -73,12 +76,40 @@ def get_session(request: Request):
         yield session
 
 
+def parse_bind(value: str) -> tuple[str, int]:
+    host, separator, port_text = value.rpartition(":")
+    if not separator or not host or not port_text.isdecimal():
+        raise ValueError(f"Invalid bind address: {value}")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Invalid bind address: {value}")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host, port
+
+
+def validate_admin_bind(value: str, allow_remote: bool) -> tuple[str, int]:
+    host, port = parse_bind(value)
+    try:
+        local = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        local = host.lower() == "localhost"
+    if not local and not allow_remote:
+        raise ValueError("ADMIN_BIND must be loopback unless ADMIN_ALLOW_REMOTE=true")
+    if not local:
+        LOGGER.warning("Remote admin bind enabled: %s", value)
+    return host, port
+
+
 def create_admin_app(
     database_url: str | None = None, admin_token: str | None = None
 ) -> FastAPI:
     token = admin_token if admin_token is not None else os.getenv("ADMIN_TOKEN", "")
     if not token.strip() or token == PLACEHOLDER_TOKEN:
         raise ValueError("ADMIN_TOKEN must be set to a non-placeholder secret")
+    bind = os.getenv("ADMIN_BIND", "127.0.0.1:8081")
+    allow_remote = os.getenv("ADMIN_ALLOW_REMOTE", "false").lower() == "true"
+    validate_admin_bind(bind, allow_remote)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):

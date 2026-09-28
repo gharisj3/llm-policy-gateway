@@ -5,7 +5,11 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 
-from llm_policy_gateway.admin import PLACEHOLDER_TOKEN, create_admin_app
+from llm_policy_gateway.admin import (
+    PLACEHOLDER_TOKEN,
+    create_admin_app,
+    validate_admin_bind,
+)
 from llm_policy_gateway.app import create_app
 from llm_policy_gateway.cli import main
 
@@ -85,3 +89,16 @@ def test_cli_tenant_and_key_commands(database_url, capsys) -> None:
     assert main(["key", "revoke", created["id"]], database_url) == 0
     revoked = json.loads(capsys.readouterr().out)
     assert revoked["revoked_at"] is not None
+
+
+def test_admin_bind_requires_explicit_remote_opt_in(
+    database_url, monkeypatch, caplog
+) -> None:
+    assert validate_admin_bind("127.0.0.1:8081", False) == ("127.0.0.1", 8081)
+    assert validate_admin_bind("[::1]:8081", False) == ("::1", 8081)
+    monkeypatch.setenv("ADMIN_BIND", "0.0.0.0:8081")
+    with pytest.raises(ValueError, match="ADMIN_ALLOW_REMOTE"):
+        create_admin_app(database_url=database_url, admin_token="valid-admin-token")
+    monkeypatch.setenv("ADMIN_ALLOW_REMOTE", "true")
+    create_admin_app(database_url=database_url, admin_token="valid-admin-token")
+    assert "Remote admin bind enabled" in caplog.text

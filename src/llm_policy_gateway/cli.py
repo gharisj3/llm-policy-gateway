@@ -7,24 +7,17 @@ import os
 
 import uvicorn
 
-from llm_policy_gateway.admin import create_admin_app
+from llm_policy_gateway.admin import create_admin_app, parse_bind
 from llm_policy_gateway.app import create_app
 from llm_policy_gateway.db import make_engine, make_session_factory
 from llm_policy_gateway.keys import create_tenant, issue_key, list_keys, revoke_key
 
 
-def _bind(value: str) -> tuple[str, int]:
-    host, separator, port = value.rpartition(":")
-    if not separator or not host or not port.isdecimal():
-        raise ValueError(f"Invalid bind address: {value}")
-    return host, int(port)
-
-
 async def _serve() -> None:
     admin_app = create_admin_app()
     public_app = create_app()
-    gateway_host, gateway_port = _bind(os.getenv("GATEWAY_BIND", "127.0.0.1:8080"))
-    admin_host, admin_port = _bind(os.getenv("ADMIN_BIND", "127.0.0.1:8081"))
+    gateway_host, gateway_port = parse_bind(os.getenv("GATEWAY_BIND", "127.0.0.1:8080"))
+    admin_host, admin_port = parse_bind(os.getenv("ADMIN_BIND", "127.0.0.1:8081"))
     gateway = uvicorn.Server(
         uvicorn.Config(public_app, host=gateway_host, port=gateway_port)
     )
