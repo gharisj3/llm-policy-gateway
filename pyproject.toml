@@ -25,6 +25,7 @@ lpg = "llm_policy_gateway.cli:main"
 [project.optional-dependencies]
 dev = [
     "httpx==0.28.1",
+    "openai==3.19.2",
     "pytest==9.1.1",
     "ruff==0.16.9",
 ]
