@@ -1,4 +1,4 @@
-.PHONY: test lint format migrate serve
+.PHONY: test lint format migrate serve models
 
 test:
 	python -m pytest
@@ -16,3 +16,6 @@ migrate:
 
 serve:
 	lpg serve
+
+models:
+	python scripts/install_model.py
