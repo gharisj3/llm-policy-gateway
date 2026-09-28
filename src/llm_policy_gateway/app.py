@@ -66,6 +66,10 @@ def _rate_admission(
     request: Request, context: AuthContext, body: ChatRequest | EmbedRequest
 ) -> None:
     estimate = estimate_tokens(_payload_texts(body))
+    if isinstance(body, ChatRequest):
+        estimate += (
+            body.max_completion_tokens or body.max_tokens or context.policy.max_tokens
+        )
     state = request.app.state.rate_limiter.admit(
         context.tenant_id, context.policy.rpm, context.policy.tpm, estimate
     )

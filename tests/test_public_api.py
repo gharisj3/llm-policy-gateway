@@ -471,6 +471,16 @@ def test_rate_limit_request_and_token_rejections(gateway) -> None:
     assert int(denied.headers["Retry-After"]) > 0
     assert len(provider.received) == 1
     client.app.state.rate_limiter.buckets.clear()
+    policy.tpm = 3
+    denied = client.post(
+        "/v1/chat/completions",
+        headers=auth,
+        json={**body, "max_tokens": 4},
+    )
+    assert denied.status_code == 429
+    assert denied.json()["error"]["code"] == "rate_limited"
+    assert len(provider.received) == 1
+    client.app.state.rate_limiter.buckets.clear()
     policy.rpm = 30
     policy.tpm = 1
     denied = client.post(
