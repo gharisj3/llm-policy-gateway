@@ -1,0 +1,20 @@
+defaults:
+  allowed_models: [approved-local]
+  max_tokens: 1024
+  redaction_profile: standard
+  budget_usd_per_day: "10.00"
+  rpm: 60
+  tpm: 30000
+  injection_mode: flag
+tenants:
+  clinical-team:
+    allowed_models: [clinical-local]
+    max_tokens: 512
+    redaction_profile: phi
+    budget_usd_per_day: "5.00"
+    rpm: 30
+    tpm: 12000
+    injection_mode: block
+  billing-team:
+    allowed_models: [billing-local]
+    redaction_profile: standard
