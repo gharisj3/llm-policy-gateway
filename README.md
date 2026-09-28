@@ -16,4 +16,3 @@ python -m uvicorn llm_policy_gateway.app:app --host 127.0.0.1 --port 8080
 
 Run the checks with `make lint` and `make test`. Copy `.env.example` to `.env`
 before configuring services in later stages.
-
