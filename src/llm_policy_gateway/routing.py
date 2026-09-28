@@ -69,7 +69,9 @@ class Router:
         jitter: Callable[[float, float], float] = random.uniform,
     ) -> None:
         if max_retries < 0 or timeout_seconds <= 0:
-            raise ValueError("Upstream retries must be nonnegative and timeout positive")
+            raise ValueError(
+                "Upstream retries must be nonnegative and timeout positive"
+            )
         missing = {
             route.provider for route in routes.models.values()
         } - providers.keys()
