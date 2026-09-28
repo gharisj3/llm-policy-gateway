@@ -20,6 +20,9 @@ dependencies = [
     "uvicorn==0.35.0",
 ]
 
+[project.scripts]
+lpg = "llm_policy_gateway.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "httpx==0.28.1",
