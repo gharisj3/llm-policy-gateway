@@ -58,7 +58,7 @@ def test_admin_auth_and_one_time_key_response(database_url) -> None:
 def test_placeholder_token_refuses_startup_and_public_has_no_admin(
     database_url,
 ) -> None:
-    for token in ("", PLACEHOLDER_TOKEN):
+    for token in ("", "   ", PLACEHOLDER_TOKEN):
         with pytest.raises(ValueError, match="ADMIN_TOKEN"):
             create_admin_app(database_url=database_url, admin_token=token)
     with TestClient(create_app(database_url=database_url)) as client:

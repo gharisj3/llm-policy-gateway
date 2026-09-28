@@ -71,7 +71,7 @@ def create_admin_app(
     database_url: str | None = None, admin_token: str | None = None
 ) -> FastAPI:
     token = admin_token if admin_token is not None else os.getenv("ADMIN_TOKEN", "")
-    if not token or token == PLACEHOLDER_TOKEN:
+    if not token.strip() or token == PLACEHOLDER_TOKEN:
         raise ValueError("ADMIN_TOKEN must be set to a non-placeholder secret")
 
     @asynccontextmanager
