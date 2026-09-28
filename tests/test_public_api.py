@@ -1,6 +1,9 @@
 import json
 import logging
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from alembic import command
@@ -377,3 +380,33 @@ def test_anonymizer_failure_returns_503_without_provider_call(
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "redaction_unavailable"
     assert provider.received == []
+
+
+def test_slow_analysis_does_not_block_healthz(gateway, monkeypatch) -> None:
+    client, key, _provider = gateway
+    started = threading.Event()
+    original = client.app.state.redactor.analyzer.analyze
+
+    def slow(**kwargs):
+        started.set()
+        time.sleep(0.3)
+        return original(**kwargs)
+
+    monkeypatch.setattr(client.app.state.redactor.analyzer, "analyze", slow)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            client.post,
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": "clinical-local",
+                "messages": [{"role": "user", "content": "hello gateway"}],
+            },
+        )
+        assert started.wait(2)
+        before = time.perf_counter()
+        health = client.get("/healthz")
+        elapsed = time.perf_counter() - before
+        assert health.status_code == 200
+        assert elapsed < 0.1
+        assert future.result().status_code == 200

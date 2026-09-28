@@ -16,6 +16,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 
 from llm_policy_gateway.auth import (
@@ -46,7 +47,7 @@ from llm_policy_gateway.schemas import ChatRequest, EmbedRequest
 LOGGER = logging.getLogger(__name__)
 
 
-def _redact_request(
+async def _redact_request(
     request: Request,
     body: ChatRequest | EmbedRequest,
     context: AuthContext,
@@ -62,11 +63,11 @@ def _redact_request(
             profile, context.policy.redaction_allow_terms
         )
         if isinstance(body, ChatRequest):
-            redacted, report = session.redact_chat(body)
+            redacted, report = await run_in_threadpool(session.redact_chat, body)
             for message in redacted.messages:
                 message.name = None
         else:
-            redacted, report = session.redact_embed(body)
+            redacted, report = await run_in_threadpool(session.redact_embed, body)
         if redacted.user is not None:
             identity = f"{context.tenant_id}:{redacted.user}".encode()
             digest = hmac.new(
@@ -221,7 +222,7 @@ def create_app(
             )
         if body.max_tokens is None and body.max_completion_tokens is None:
             body = body.model_copy(update={"max_tokens": context.policy.max_tokens})
-        body, redaction_session, _report = _redact_request(request, body, context)
+        body, redaction_session, _report = await _redact_request(request, body, context)
         if hasattr(request.state, "redaction_header"):
             response.headers["x-gateway-redactions"] = request.state.redaction_header
         result = await request.app.state.router.chat(body)
@@ -259,7 +260,9 @@ def create_app(
     ) -> dict | JSONResponse:
         if body.model not in context.policy.allowed_models:
             return error_response(403, "Model is not allowed.", "model_not_allowed")
-        body, _redaction_session, _report = _redact_request(request, body, context)
+        body, _redaction_session, _report = await _redact_request(
+            request, body, context
+        )
         if hasattr(request.state, "redaction_header"):
             response.headers["x-gateway-redactions"] = request.state.redaction_header
         result = await request.app.state.router.embed(body)
