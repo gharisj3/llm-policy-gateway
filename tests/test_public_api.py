@@ -226,6 +226,55 @@ def test_invalid_npi_does_not_hide_other_entities(gateway) -> None:
     assert "US_NPI" not in invalid.headers["x-gateway-redactions"]
 
 
+def test_identity_fields_are_removed_or_pseudonymized_by_tenant(gateway) -> None:
+    client, key, provider = gateway
+    raw_user = "jane.roe@example.com"
+    raw_name = "Jane Roe"
+    with client.app.state.session_factory() as session:
+        other = create_tenant(session, "billing-team")
+        other_key = issue_key(session, other.id, "integration").key
+
+    def send(api_key: str, model: str):
+        return client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": model,
+                "user": raw_user,
+                "messages": [
+                    {"role": "user", "name": raw_name, "content": "hello gateway"}
+                ],
+            },
+        )
+
+    assert send(key, "clinical-local").status_code == 200
+    assert send(key, "clinical-local").status_code == 200
+    assert send(other_key, "billing-local").status_code == 200
+    first, second, third = [item["payload"] for item in provider.received]
+    assert first["user"].startswith("u_")
+    assert len(first["user"]) == 18
+    assert first["user"] == second["user"]
+    assert first["user"] != third["user"]
+    for payload in (first, second, third):
+        assert raw_user not in json.dumps(payload)
+        assert raw_name not in json.dumps(payload)
+        assert "name" not in payload["messages"][0]
+
+    embedded = client.post(
+        "/v1/embeddings",
+        headers={"Authorization": f"Bearer {key}"},
+        json={"model": "clinical-local", "input": "hello gateway", "user": raw_user},
+    )
+    assert embedded.status_code == 200
+    assert provider.received[3]["payload"]["user"] == first["user"]
+
+    client.app.state.policy.tenants["clinical-team"].redaction_profile = "off"
+    assert send(key, "clinical-local").status_code == 200
+    off_payload = provider.received[4]["payload"]
+    assert off_payload["user"] == raw_user
+    assert off_payload["messages"][0]["name"] == raw_name
+
+
 def test_response_reidentification_toggle_and_collision(gateway) -> None:
     client, key, provider = gateway
     auth = {"Authorization": f"Bearer {key}"}

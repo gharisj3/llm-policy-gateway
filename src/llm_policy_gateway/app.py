@@ -1,6 +1,8 @@
 """HTTP application entry point."""
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -61,8 +63,16 @@ def _redact_request(
         )
         if isinstance(body, ChatRequest):
             redacted, report = session.redact_chat(body)
+            for message in redacted.messages:
+                message.name = None
         else:
             redacted, report = session.redact_embed(body)
+        if redacted.user is not None:
+            identity = f"{context.tenant_id}:{redacted.user}".encode()
+            digest = hmac.new(
+                require_key_pepper(), identity, hashlib.sha256
+            ).hexdigest()
+            redacted.user = f"u_{digest[:16]}"
     except Exception:
         latency = (time.perf_counter() - started) * 1000
         LOGGER.error(
