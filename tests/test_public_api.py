@@ -199,6 +199,33 @@ def test_phi_request_is_redacted_before_provider(gateway, caplog) -> None:
     assert "Jane Roe" not in json.dumps(log)
 
 
+def test_invalid_npi_does_not_hide_other_entities(gateway) -> None:
+    client, key, provider = gateway
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "clinical-local",
+            "messages": [{"role": "user", "content": "provider line 2125550147"}],
+        },
+    )
+    assert response.status_code == 200
+    payload = json.dumps(provider.received[0]["payload"])
+    assert "2125550147" not in payload
+    invalid = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "clinical-local",
+            "messages": [{"role": "user", "content": "provider line 2125550146"}],
+        },
+    )
+    assert invalid.status_code == 200
+    assert "2125550146" not in json.dumps(provider.received[1]["payload"])
+    assert "PHONE_NUMBER=1" in invalid.headers["x-gateway-redactions"]
+    assert "US_NPI" not in invalid.headers["x-gateway-redactions"]
+
+
 def test_response_reidentification_toggle_and_collision(gateway) -> None:
     client, key, provider = gateway
     auth = {"Authorization": f"Bearer {key}"}

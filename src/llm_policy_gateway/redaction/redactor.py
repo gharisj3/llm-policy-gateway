@@ -18,11 +18,8 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 from llm_policy_gateway.redaction.recognizers import (
-    NPI_CONTEXT,
-    NPI_PATTERN,
     MedicalRecordRecognizer,
     NpiRecognizer,
-    valid_npi,
 )
 from llm_policy_gateway.schemas import ChatRequest, EmbedRequest
 
@@ -159,21 +156,12 @@ class RedactionSession:
         self, text: str, results: list[RecognizerResult]
     ) -> list[RecognizerResult]:
         allow_spans = self._allow_spans(text)
-        invalid_npi_spans = []
-        for match in NPI_PATTERN.finditer(text):
-            window = text[max(0, match.start() - 40) : min(len(text), match.end() + 40)]
-            if NPI_CONTEXT.search(window) and not valid_npi(match.group()):
-                invalid_npi_spans.append((match.start(), match.end()))
         candidates = [
             result
             for result in results
             if not any(
                 start <= result.start and result.end <= end
                 for start, end in allow_spans
-            )
-            and not any(
-                result.start < end and result.end > start
-                for start, end in invalid_npi_spans
             )
         ]
         candidates.sort(

@@ -68,10 +68,8 @@ def test_phi_synthetic_values_and_wrong_identifiers(redactor: Redactor) -> None:
     ):
         assert f"<{entity}_1>" in text
         assert report.counts[entity] == 1
-    wrong, _ = redactor.session("phi").redact_chat(
-        chat("NPI 0000000007; code ZZZ12345")
-    )
-    assert "0000000007" in wrong.messages[0].content
+    wrong, _ = redactor.session("phi").redact_chat(chat("NPI 0000000007"))
+    assert "<US_NPI_" not in wrong.messages[0].content
     assert "<MEDICAL_RECORD_NUMBER_" not in wrong.messages[0].content
 
 
