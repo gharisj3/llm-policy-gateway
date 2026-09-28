@@ -104,10 +104,20 @@ def load_policy(path: str | Path) -> PolicyDocument:
         line = mark.line + 1 if mark else 1
         raise ValueError(f"Invalid policy {source}, line {line}: {error}") from error
     try:
-        return PolicyDocument.model_validate(raw)
+        document = PolicyDocument.model_validate(raw)
     except ValidationError as error:
         first = error.errors()[0]
         line = _line_for_location(node, first["loc"])
         raise ValueError(
             f"Invalid policy {source}, line {line}: {first['msg']} at {first['loc']}"
         ) from error
+    for name in document.tenants:
+        try:
+            document.for_tenant(name)
+        except ValidationError as error:
+            line = _line_for_location(node, ("tenants", name))
+            raise ValueError(
+                f"Invalid policy {source}, line {line}: "
+                f"tenant {name!r} has an invalid override: {error.errors()[0]['msg']}"
+            ) from error
+    return document

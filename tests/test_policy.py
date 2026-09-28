@@ -57,3 +57,15 @@ def test_duplicate_yaml_key_is_rejected(tmp_path) -> None:
     path.write_text("defaults: {}\ndefaults: {}\ntenants: {}\n")
     with pytest.raises(ValueError, match="duplicate key"):
         load_policy(path)
+
+
+def test_null_override_stops_startup(tmp_path) -> None:
+    source = Path("policy.example.yaml").read_text(encoding="utf-8")
+    path = tmp_path / "bad.yaml"
+    path.write_text(
+        source.replace("    max_tokens: 512\n", "    max_tokens: null\n"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"line \d+: tenant 'clinical-team'"):
+        with TestClient(create_app(path)):
+            pass
