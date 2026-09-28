@@ -5,8 +5,8 @@ language models they call, and enforces tenant policy in code the application
 cannot bypass. Applications change one base URL. Everything else stays the same.
 
 > **Status: under active development.** Authentication, tenant policy, model
-> routing, redaction and the OpenAI-compatible endpoints work today. Budgets,
-> injection screening, audit logging and streaming are next. The roadmap below
+> routing, redaction, budgets, rate limits and the OpenAI-compatible endpoints
+> work today. Injection screening, audit logging and streaming are next. The roadmap below
 > tracks what is done.
 
 ## Why it exists
@@ -38,6 +38,9 @@ provider.
 - **Request redaction.** Configured tenants replace recognized sensitive values
   with typed placeholders before routing. A redaction failure refuses the
   request. Response re-identification is optional and disabled by default.
+- **Daily budgets and rate limits.** Prices are explicit for each public model.
+  A request reserves its estimated maximum cost before the provider call, then
+  settles against reported usage. Tenant request and token buckets limit bursts.
 - **Explicit routing.** `models.yaml` maps public model names to a provider and
   upstream model. There is no silent fallback to a different model. Transient
   upstream errors are retried with jittered backoff, then surfaced as a 502.
@@ -53,8 +56,10 @@ flowchart LR
     C[Client app<br/>OpenAI SDK] -->|base_url = gateway| G
     subgraph G[LLM Policy Gateway]
         A[Auth<br/>tenant API key] --> P[Policy<br/>models, token ceiling]
-        P --> D[Redaction<br/>typed placeholders]
-        D --> R[Router<br/>models.yaml, retries]
+        P --> L[Rate limits<br/>requests, tokens]
+        L --> D[Redaction<br/>typed placeholders]
+        D --> B[Budget reservation<br/>UTC day]
+        B --> R[Router<br/>models.yaml, retries]
     end
     R --> M[Provider adapter]
     AD[Admin API<br/>loopback only] -.-> DB[(Tenants & keys)]
@@ -72,6 +77,7 @@ make models  # install the configured English language model
 
 cp policy.example.yaml policy.yaml
 cp models.example.yaml models.yaml
+cp pricing.example.yaml pricing.yaml
 
 # Required secrets. Generate your own; these are examples only.
 export KEY_PEPPER="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
@@ -110,6 +116,19 @@ identifiers. A missing language model stops startup; run `make models` to
 install the configured model. Local inference runs fully on-premises, no data
 leaves the host.
 
+## What stops a runaway loop
+
+Before calling a provider, the gateway checks the tenant's request and token
+rates, then reserves a worst-case cost against its UTC daily budget. A request
+over either limit receives a 429 with no upstream call. Successful calls settle
+at reported token usage; failed calls release their reservation. The admin API
+and `lpg usage <tenant-id> [--day YYYY-MM-DD]` show daily totals.
+
+SQLite budget reservations are atomic only within one gateway process. Run a
+single gateway instance with SQLite; Postgres locks the tenant row for atomic
+reservations across instances. Rate-limit buckets are per process; a shared
+store is future work.
+
 ## Development
 
 ```sh
@@ -124,7 +143,7 @@ make format
 - [x] Tenants, API keys, policy validation, admin API and CLI
 - [x] OpenAI-compatible endpoints, routing, retries, mock provider
 - [x] PII/PHI redaction before any request leaves the gateway
-- [ ] Per-tenant daily budgets and rate limits
+- [x] Per-tenant daily budgets and rate limits
 - [ ] Prompt-injection screening for tool and retrieved content
 - [ ] Append-only audit log (fail-closed) and Prometheus metrics
 - [ ] Streaming responses
@@ -136,7 +155,7 @@ make format
 This is a reference implementation, not a certified compliance product. Today
 it routes only to the mock provider. Redaction is probabilistic: names and
 dates can be missed, and a measured miss rate will arrive with the evaluation
-stage. Budget and audit controls remain on the roadmap. Nothing here has been
+stage. Audit controls remain on the roadmap. Nothing here has been
 load-tested.
 
 ## Licence
