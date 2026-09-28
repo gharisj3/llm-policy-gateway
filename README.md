@@ -5,7 +5,7 @@ language models they call, and enforces tenant policy in code the application
 cannot bypass. Applications change one base URL. Everything else stays the same.
 
 > **Status: under active development.** Authentication, tenant policy, model
-> routing and the OpenAI-compatible endpoints work today. Redaction, budgets,
+> routing, redaction and the OpenAI-compatible endpoints work today. Budgets,
 > injection screening, audit logging and streaming are next. The roadmap below
 > tracks what is done.
 
@@ -35,6 +35,9 @@ provider.
 - **Checks before the model call.** A disallowed model, an over-limit token
   request or a bad key gets rejected before any provider is contacted. Tests
   assert zero upstream calls in each case.
+- **Request redaction.** Configured tenants replace recognized sensitive values
+  with typed placeholders before routing. A redaction failure refuses the
+  request. Response re-identification is optional and disabled by default.
 - **Explicit routing.** `models.yaml` maps public model names to a provider and
   upstream model. There is no silent fallback to a different model. Transient
   upstream errors are retried with jittered backoff, then surfaced as a 502.
@@ -50,7 +53,8 @@ flowchart LR
     C[Client app<br/>OpenAI SDK] -->|base_url = gateway| G
     subgraph G[LLM Policy Gateway]
         A[Auth<br/>tenant API key] --> P[Policy<br/>models, token ceiling]
-        P --> R[Router<br/>models.yaml, retries]
+        P --> D[Redaction<br/>typed placeholders]
+        D --> R[Router<br/>models.yaml, retries]
     end
     R --> M[Provider adapter]
     AD[Admin API<br/>loopback only] -.-> DB[(Tenants & keys)]
@@ -64,6 +68,7 @@ Requires Python 3.11 or newer.
 ```sh
 python -m venv .venv
 python -m pip install -e ".[dev]"
+make models  # install the configured English language model
 
 cp policy.example.yaml policy.yaml
 cp models.example.yaml models.yaml
@@ -94,10 +99,21 @@ The example configuration routes every model to a built-in mock provider, so
 the whole flow runs without any model server. Every setting is documented in
 `.env.example`.
 
+## What reaches the model
+
+For a tenant using the `phi` profile, a request such as `Jane Roe, SSN
+123-45-6789` reaches the provider as `<PERSON_1>, SSN <US_SSN_1>` when both
+values are recognized. The request-local mapping stays in memory; headers and
+logs contain entity counts only. The `standard` profile covers common
+identifiers, while `phi` also checks names, dates, locations and clinical
+identifiers. A missing language model stops startup; run `make models` to
+install the configured model. Local inference runs fully on-premises, no data
+leaves the host.
+
 ## Development
 
 ```sh
-make test     # full suite, offline, no model or API keys needed
+make test     # full suite, offline, no API keys needed
 make lint     # ruff check and format check
 make format
 ```
@@ -107,7 +123,7 @@ make format
 - [x] Scaffold, CI
 - [x] Tenants, API keys, policy validation, admin API and CLI
 - [x] OpenAI-compatible endpoints, routing, retries, mock provider
-- [ ] PII/PHI redaction before any request leaves the gateway
+- [x] PII/PHI redaction before any request leaves the gateway
 - [ ] Per-tenant daily budgets and rate limits
 - [ ] Prompt-injection screening for tool and retrieved content
 - [ ] Append-only audit log (fail-closed) and Prometheus metrics
@@ -118,8 +134,10 @@ make format
 ## Limitations
 
 This is a reference implementation, not a certified compliance product. Today
-it routes only to the mock provider, and none of the redaction, budget or audit
-controls listed in the roadmap exist yet. Nothing here has been load-tested.
+it routes only to the mock provider. Redaction is probabilistic: names and
+dates can be missed, and a measured miss rate will arrive with the evaluation
+stage. Budget and audit controls remain on the roadmap. Nothing here has been
+load-tested.
 
 ## Licence
 
