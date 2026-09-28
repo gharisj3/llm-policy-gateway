@@ -1,6 +1,8 @@
 """HTTP application entry point."""
 
 import base64
+import json
+import logging
 import os
 import struct
 import time
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
@@ -30,8 +32,65 @@ from llm_policy_gateway.db import (
 from llm_policy_gateway.keys import InvalidKey, require_key_pepper
 from llm_policy_gateway.policy import PolicyDenied, load_policy
 from llm_policy_gateway.providers import MockProvider, Provider
+from llm_policy_gateway.redaction.redactor import (
+    RedactionReport,
+    RedactionSession,
+    RedactionUnavailable,
+    Redactor,
+)
 from llm_policy_gateway.routing import Router, UpstreamFailure, load_model_routes
 from llm_policy_gateway.schemas import ChatRequest, EmbedRequest
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _redact_request(
+    request: Request,
+    body: ChatRequest | EmbedRequest,
+    context: AuthContext,
+) -> tuple[ChatRequest | EmbedRequest, RedactionSession | None, RedactionReport]:
+    profile = context.policy.redaction_profile
+    if profile == "off":
+        report = RedactionReport({})
+        LOGGER.info(json.dumps({"event": "redaction", "counts": {}, "latency_ms": 0.0}))
+        return body, None, report
+    started = time.perf_counter()
+    try:
+        session = request.app.state.redactor.session(
+            profile, context.policy.redaction_allow_terms
+        )
+        if isinstance(body, ChatRequest):
+            redacted, report = session.redact_chat(body)
+        else:
+            redacted, report = session.redact_embed(body)
+    except Exception:
+        latency = (time.perf_counter() - started) * 1000
+        LOGGER.error(
+            json.dumps(
+                {
+                    "event": "redaction",
+                    "counts": {},
+                    "latency_ms": round(latency, 3),
+                    "outcome": "failure",
+                }
+            )
+        )
+        raise RedactionUnavailable from None
+    latency = (time.perf_counter() - started) * 1000
+    LOGGER.info(
+        json.dumps(
+            {
+                "event": "redaction",
+                "counts": report.counts,
+                "latency_ms": round(latency, 3),
+            }
+        )
+    )
+    if report.counts:
+        request.state.redaction_header = ",".join(
+            f"{entity}={report.counts[entity]}" for entity in sorted(report.counts)
+        )
+    return redacted, session, report
 
 
 def create_app(
@@ -46,6 +105,18 @@ def create_app(
         require_key_pepper()
         path = policy_path or os.getenv("DEFAULT_POLICY_PATH", "policy.yaml")
         application.state.policy = load_policy(path)
+        policies = [
+            application.state.policy.for_tenant(name)
+            for name in application.state.policy.tenants
+        ]
+        if any(policy.redaction_profile != "off" for policy in policies):
+            application.state.redactor = Redactor.create(
+                os.getenv("PRESIDIO_NLP_MODEL", "en_core_web_lg"),
+                language=os.getenv("PRESIDIO_LANGUAGE", "en"),
+                threshold=float(os.getenv("REDACTION_SCORE_THRESHOLD", "0.5")),
+            )
+        else:
+            application.state.redactor = None
         route_path = models_path or os.getenv("MODELS_PATH", "models.yaml")
         routes = load_model_routes(route_path, application.state.policy)
         application.state.router = Router(
@@ -74,8 +145,17 @@ def create_app(
     application.add_exception_handler(PolicyDenied, policy_denied_handler)
 
     @application.exception_handler(UpstreamFailure)
-    def upstream_error(_request: Request, error: UpstreamFailure) -> JSONResponse:
-        return error_response(502, str(error), "upstream_error")
+    def upstream_error(request: Request, error: UpstreamFailure) -> JSONResponse:
+        response = error_response(502, str(error), "upstream_error")
+        if hasattr(request.state, "redaction_header"):
+            response.headers["x-gateway-redactions"] = request.state.redaction_header
+        return response
+
+    @application.exception_handler(RedactionUnavailable)
+    def redaction_unavailable(
+        _request: Request, _error: RedactionUnavailable
+    ) -> JSONResponse:
+        return error_response(503, "Redaction is unavailable.", "redaction_unavailable")
 
     @application.exception_handler(RequestValidationError)
     def validation_error(
@@ -114,6 +194,7 @@ def create_app(
         body: ChatRequest,
         context: Annotated[AuthContext, Depends(authenticate_request)],
         request: Request,
+        response: Response,
     ) -> dict | JSONResponse:
         if body.stream:
             return error_response(
@@ -130,7 +211,15 @@ def create_app(
             )
         if body.max_tokens is None and body.max_completion_tokens is None:
             body = body.model_copy(update={"max_tokens": context.policy.max_tokens})
+        body, redaction_session, _report = _redact_request(request, body, context)
+        if hasattr(request.state, "redaction_header"):
+            response.headers["x-gateway-redactions"] = request.state.redaction_header
         result = await request.app.state.router.chat(body)
+        content = (
+            redaction_session.reidentify(result.content)
+            if redaction_session is not None and context.policy.reidentify_response
+            else result.content
+        )
         return {
             "id": f"chatcmpl-{uuid4().hex}",
             "object": "chat.completion",
@@ -139,7 +228,7 @@ def create_app(
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": result.content},
+                    "message": {"role": "assistant", "content": content},
                     "finish_reason": result.finish_reason,
                     "logprobs": None,
                 }
@@ -156,9 +245,13 @@ def create_app(
         body: EmbedRequest,
         context: Annotated[AuthContext, Depends(authenticate_request)],
         request: Request,
+        response: Response,
     ) -> dict | JSONResponse:
         if body.model not in context.policy.allowed_models:
             return error_response(403, "Model is not allowed.", "model_not_allowed")
+        body, _redaction_session, _report = _redact_request(request, body, context)
+        if hasattr(request.state, "redaction_header"):
+            response.headers["x-gateway-redactions"] = request.state.redaction_header
         result = await request.app.state.router.embed(body)
         data = []
         for index, vector in enumerate(result.embeddings):

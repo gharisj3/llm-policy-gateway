@@ -1,3 +1,5 @@
+import json
+import logging
 from collections.abc import Iterator
 
 import pytest
@@ -143,3 +145,159 @@ def test_retry_outcomes_and_no_fallback(gateway) -> None:
     assert failed.json()["error"]["code"] == "upstream_error"
     assert "429" in failed.json()["error"]["message"]
     assert len(provider.received) == 3
+
+
+def test_phi_request_is_redacted_before_provider(gateway, caplog) -> None:
+    client, key, provider = gateway
+    raw = (
+        "Jane Roe, DOB 01/02/1900, SSN 123-45-6789, "
+        "jane.roe@example.com, 202-555-0143, "
+        "NPI 0000000006, MRN: ZZZ12345"
+    )
+    with caplog.at_level(logging.INFO, logger="llm_policy_gateway.app"):
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={
+                "model": "clinical-local",
+                "messages": [{"role": "user", "content": raw}],
+            },
+        )
+    assert response.status_code == 200
+    payload = json.dumps(provider.received[0]["payload"])
+    header = response.headers["x-gateway-redactions"]
+    for value in (
+        "Jane Roe",
+        "01/02/1900",
+        "123-45-6789",
+        "jane.roe@example.com",
+        "202-555-0143",
+        "0000000006",
+        "ZZZ12345",
+    ):
+        assert value not in payload + header + caplog.text
+    for entity in (
+        "PERSON",
+        "DATE_TIME",
+        "US_SSN",
+        "EMAIL_ADDRESS",
+        "PHONE_NUMBER",
+        "US_NPI",
+        "MEDICAL_RECORD_NUMBER",
+    ):
+        assert f"<{entity}_1>" in payload
+        assert f"{entity}=1" in header
+    log = json.loads(
+        next(
+            record.message
+            for record in caplog.records
+            if '"event": "redaction"' in record.message
+        )
+    )
+    assert log["counts"]["PERSON"] == 1
+    assert isinstance(log["latency_ms"], float)
+    assert "Jane Roe" not in json.dumps(log)
+
+
+def test_response_reidentification_toggle_and_collision(gateway) -> None:
+    client, key, provider = gateway
+    auth = {"Authorization": f"Bearer {key}"}
+    body = {
+        "model": "clinical-local",
+        "messages": [
+            {"role": "user", "content": "<PERSON_1> Patient Jane Roe visited today."}
+        ],
+    }
+    off = client.post("/v1/chat/completions", headers=auth, json=body)
+    assert (
+        "<PERSON_1> Patient <PERSON_2>"
+        in off.json()["choices"][0]["message"]["content"]
+    )
+    assert "Jane Roe" not in off.text
+    client.app.state.policy.tenants["clinical-team"].reidentify_response = True
+    on = client.post("/v1/chat/completions", headers=auth, json=body)
+    assert (
+        "<PERSON_1> Patient Jane Roe" in on.json()["choices"][0]["message"]["content"]
+    )
+    assert len(provider.received) == 2
+
+
+def test_off_profile_and_tool_embedding_paths(gateway) -> None:
+    client, key, provider = gateway
+    auth = {"Authorization": f"Bearer {key}"}
+    body = {
+        "model": "clinical-local",
+        "messages": [
+            {"role": "tool", "content": "jane.roe@example.com"},
+            {"role": "user", "content": [{"type": "text", "text": "Jane Roe"}]},
+        ],
+    }
+    response = client.post("/v1/chat/completions", headers=auth, json=body)
+    assert response.status_code == 200
+    assert "jane.roe@example.com" not in json.dumps(provider.received[0])
+    assert "Jane Roe" not in json.dumps(provider.received[0])
+    embedded = client.post(
+        "/v1/embeddings",
+        headers=auth,
+        json={
+            "model": "clinical-local",
+            "input": ["jane.roe@example.com", "202-555-0143"],
+        },
+    )
+    assert embedded.status_code == 200
+    assert provider.received[1]["payload"]["input"][0] == "<EMAIL_ADDRESS_1>"
+    assert "PHONE_NUMBER=1" in embedded.headers["x-gateway-redactions"]
+    client.app.state.policy.tenants["clinical-team"].redaction_profile = "off"
+    off = client.post("/v1/chat/completions", headers=auth, json=body)
+    assert off.status_code == 200
+    assert "x-gateway-redactions" not in off.headers
+    assert "jane.roe@example.com" in json.dumps(provider.received[2])
+
+
+def test_analyzer_failure_returns_503_without_provider_call(
+    gateway, monkeypatch
+) -> None:
+    client, key, provider = gateway
+
+    def fail(**_kwargs):
+        raise RuntimeError("synthetic sensitive value")
+
+    monkeypatch.setattr(client.app.state.redactor.analyzer, "analyze", fail)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "clinical-local",
+            "messages": [
+                {"role": "user", "content": "Patient Jane Roe visited today."}
+            ],
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "redaction_unavailable"
+    assert "synthetic sensitive value" not in response.text
+    assert provider.received == []
+
+
+def test_anonymizer_failure_returns_503_without_provider_call(
+    gateway, monkeypatch
+) -> None:
+    client, key, provider = gateway
+
+    def fail(**_kwargs):
+        raise RuntimeError("synthetic sensitive value")
+
+    monkeypatch.setattr(client.app.state.redactor.anonymizer, "anonymize", fail)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "clinical-local",
+            "messages": [
+                {"role": "user", "content": "Patient Jane Roe visited today."}
+            ],
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "redaction_unavailable"
+    assert provider.received == []
