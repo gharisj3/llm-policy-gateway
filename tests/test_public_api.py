@@ -58,6 +58,78 @@ def test_official_sdk_chat_embeddings_and_models(gateway) -> None:
     assert [item["kind"] for item in provider.received] == ["chat", "embed"]
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "lookup", "description": "jane@example.com"},
+                }
+            ]
+        },
+        {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "jane@example.com"},
+            }
+        },
+        {"stop": ["jane@example.com"]},
+        {"tool_choice": "auto"},
+        {
+            "messages": [
+                {"role": "tool", "content": "hello", "tool_call_id": "jane@example.com"}
+            ]
+        },
+    ],
+)
+def test_uninspected_text_fields_are_refused_before_provider(gateway, extra) -> None:
+    client, key, provider = gateway
+    body = {
+        "model": "clinical-local",
+        "messages": [{"role": "user", "content": "hello"}],
+        **extra,
+    }
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json=body,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "redaction_payload_unsupported"
+    assert provider.received == []
+
+
+def test_large_tool_payload_is_included_in_budget_admission(gateway) -> None:
+    client, key, provider = gateway
+    policy = client.app.state.policy.tenants["clinical-team"]
+    policy.redaction_profile = "off"
+    policy.budget_usd_per_day = Decimal("0.001")
+    policy.tpm = 100000
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": "clinical-local",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "description": "x" * 8000,
+                    },
+                }
+            ],
+        },
+    )
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "budget_exceeded"
+    assert provider.received == []
+
+
 def test_policy_rejections_and_invalid_key_never_call_provider(gateway) -> None:
     client, key, provider = gateway
     auth = {"Authorization": f"Bearer {key}"}

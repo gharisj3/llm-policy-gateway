@@ -54,6 +54,26 @@ class RedactionUnavailable(Exception):
     pass
 
 
+class RedactionPayloadUnsupported(Exception):
+    """Free-text request fields outside the reviewed redaction surface."""
+
+
+def require_supported_redaction_payload(request: ChatRequest) -> None:
+    # Rewriting schema keys/enums or tool identifiers can change program
+    # semantics. Refuse these fields rather than forwarding uninspected text.
+    if (
+        request.tools
+        or request.tool_choice is not None
+        or request.stop is not None
+        or any(message.tool_call_id is not None for message in request.messages)
+        or (
+            request.response_format is not None
+            and request.response_format.json_schema is not None
+        )
+    ):
+        raise RedactionPayloadUnsupported
+
+
 class Redactor:
     def __init__(
         self, analyzer: AnalyzerEngine, anonymizer: AnonymizerEngine, threshold: float
@@ -226,6 +246,7 @@ class RedactionSession:
         return anonymized.text
 
     def redact_chat(self, request: ChatRequest) -> tuple[ChatRequest, RedactionReport]:
+        require_supported_redaction_payload(request)
         copy = request.model_copy(deep=True)
         texts = [
             message.content
@@ -235,6 +256,7 @@ class RedactionSession:
         ]
         self._reserve(texts)
         for message in copy.messages:
+            message.name = None
             if isinstance(message.content, str):
                 message.content = self._redact_text(message.content)
             else:

@@ -1,8 +1,14 @@
 # LLM Policy Gateway
 
-An OpenAI-compatible HTTP gateway that sits between your applications and the
-language models they call, and enforces tenant policy in code the application
-cannot bypass. Applications change one base URL. Everything else stays the same.
+**Current limits:** redaction-enabled tenants accept message text and embedding input. Tool definitions/choices, tool-call identifiers, stop strings and JSON schemas are rejected with `400 redaction_payload_unsupported` rather than forwarded without sanitization. Message names are removed and the optional user identifier is hashed. Redaction can still miss entities in accepted text. Budget admission uses an approximate full-payload character-based token estimate, not a provider-tokenizer upper bound; actual usage can exceed the reservation. Failed calls release reservations and retries can incur upstream costs that are not represented in reported successful usage. Treat the budget as an admission control, not a guaranteed billing cap.
+
+A reference HTTP gateway with a tested subset of OpenAI-compatible chat,
+embedding and model-list endpoints. Tenant authentication, policy checks,
+redaction, estimated budget reservations and rate limits are implemented.
+The built-in provider is a deterministic mock; live provider adapters are planned.
+SDK compatibility applies to the documented subset, not every OpenAI API feature.
+Policy checks apply to requests sent through this gateway; deployments must
+prevent applications from reaching providers directly if bypass prevention is required.
 
 > **Status: under active development.** Authentication, tenant policy, model
 > routing, redaction, budgets, rate limits and the OpenAI-compatible endpoints
@@ -22,9 +28,7 @@ provider.
 ## What works today
 
 - **OpenAI-compatible endpoints.** `POST /v1/chat/completions`,
-  `POST /v1/embeddings` and `GET /v1/models`. The official `openai` Python SDK
-  works against the gateway by changing only `base_url` and `api_key`, and the
-  test suite proves it.
+  `POST /v1/embeddings` and `GET /v1/models`. The tests exercise basic chat, embeddings and model listing through the official `openai` Python SDK. Streaming, multimodal content and complete tool-call conversation compatibility are not implemented.
 - **Tenant API keys.** Keys are shown once at creation. Only a prefix and a
   peppered HMAC-SHA256 digest are stored. Unknown, wrong and revoked keys all
   get the same 401 and take the same code path.
@@ -113,13 +117,12 @@ values are recognized. The request-local mapping stays in memory; headers and
 logs contain entity counts only. The `standard` profile covers common
 identifiers, while `phi` also checks names, dates, locations and clinical
 identifiers. A missing language model stops startup; run `make models` to
-install the configured model. Local inference runs fully on-premises, no data
-leaves the host.
+install the configured model. The current mock provider runs locally and makes no inference-service request. Network/data residency properties of future provider adapters must be assessed separately.
 
 ## What stops a runaway loop
 
 Before calling a provider, the gateway checks the tenant's request and token
-rates, then reserves a worst-case cost against its UTC daily budget. A request
+rates, then reserves an estimated cost against its UTC daily budget. A request
 over either limit receives a 429 with no upstream call. Successful calls settle
 at reported token usage; failed calls release their reservation. The admin API
 and `lpg usage <tenant-id> [--day YYYY-MM-DD]` show daily totals.
@@ -142,7 +145,7 @@ make format
 - [x] Scaffold, CI
 - [x] Tenants, API keys, policy validation, admin API and CLI
 - [x] OpenAI-compatible endpoints, routing, retries, mock provider
-- [x] PII/PHI redaction before any request leaves the gateway
+- [x] Recognized-entity redaction in supported text fields; other free-text request surfaces refused when redaction is enabled
 - [x] Per-tenant daily budgets and rate limits
 - [ ] Prompt-injection screening for tool and retrieved content
 - [ ] Append-only audit log (fail-closed) and Prometheus metrics

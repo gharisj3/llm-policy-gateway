@@ -40,10 +40,12 @@ from llm_policy_gateway.pricing import load_pricing
 from llm_policy_gateway.providers import MockProvider, Provider
 from llm_policy_gateway.rate_limit import InMemoryRateLimiter, RateLimitExceeded
 from llm_policy_gateway.redaction.redactor import (
+    RedactionPayloadUnsupported,
     RedactionReport,
     RedactionSession,
     RedactionUnavailable,
     Redactor,
+    require_supported_redaction_payload,
 )
 from llm_policy_gateway.routing import Router, UpstreamFailure, load_model_routes
 from llm_policy_gateway.schemas import ChatRequest, EmbedRequest
@@ -52,14 +54,9 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _payload_texts(body: ChatRequest | EmbedRequest) -> list[str]:
-    if isinstance(body, EmbedRequest):
-        return [body.input] if isinstance(body.input, str) else body.input
-    return [
-        message.content
-        if isinstance(message.content, str)
-        else " ".join(part.text for part in message.content)
-        for message in body.messages
-    ]
+    # Include tool/schema payloads and message framing in the approximation.
+    # This remains an estimate, not a provider-tokenizer upper bound.
+    return [json.dumps(body.provider_payload(), ensure_ascii=False)]
 
 
 def _rate_admission(
@@ -127,6 +124,8 @@ async def _redact_request(
         report = RedactionReport({})
         LOGGER.info(json.dumps({"event": "redaction", "counts": {}, "latency_ms": 0.0}))
         return body, None, report
+    if isinstance(body, ChatRequest):
+        require_supported_redaction_payload(body)
     started = time.perf_counter()
     try:
         session = request.app.state.redactor.session(
@@ -256,6 +255,17 @@ def create_app(
         _request: Request, _error: RedactionUnavailable
     ) -> JSONResponse:
         return error_response(503, "Redaction is unavailable.", "redaction_unavailable")
+
+    @application.exception_handler(RedactionPayloadUnsupported)
+    def unsupported_redaction_payload(
+        _request: Request, _error: RedactionPayloadUnsupported
+    ) -> JSONResponse:
+        return error_response(
+            400,
+            "Redaction-enabled tenants cannot use tools, tool identifiers, "
+            "stop strings or JSON schemas until those fields can be sanitized safely.",
+            "redaction_payload_unsupported",
+        )
 
     @application.exception_handler(RequestValidationError)
     def validation_error(
